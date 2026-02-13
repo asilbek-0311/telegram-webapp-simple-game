@@ -45,7 +45,7 @@ export default function Home() {
         <Facehash
           name={faceName}
           size={160}
-          showInitial={false}
+          showInitial={true}
           enableBlink
           colors={["#ff6f61", "#6c63ff", "#2ec4b6", "#ffb703", "#3a86ff"]}
           className="facehash"
