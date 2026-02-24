@@ -66,6 +66,7 @@ export default function Home() {
     "loading"
   );
   const [statusMessage, setStatusMessage] = useState("Authenticating...");
+  const [debugInfo, setDebugInfo] = useState<string>("");
   const [graph, setGraph] = useState<GraphApiResponse | null>(null);
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -98,13 +99,29 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    let attempts = 0;
+    const maxAttempts = 20;
+
     const run = async () => {
       try {
         window.Telegram?.WebApp?.ready?.();
         window.Telegram?.WebApp?.expand?.();
 
-        const initData = window.Telegram?.WebApp?.initData?.trim();
+        const initData = window.Telegram?.WebApp?.initData?.trim() ?? "";
+        const hasTelegram = Boolean(window.Telegram?.WebApp);
+
+        setDebugInfo(
+          `hasTelegram=${hasTelegram} | initDataLen=${initData.length} | attempt=${attempts}`
+        );
+
         if (!initData) {
+          attempts += 1;
+          if (attempts < maxAttempts && !cancelled) {
+            window.setTimeout(run, 150);
+            return;
+          }
+
           setStatus("blocked");
           setStatusMessage("Open this app inside Telegram to authenticate.");
           return;
@@ -138,6 +155,9 @@ export default function Home() {
     };
 
     void run();
+    return () => {
+      cancelled = true;
+    };
   }, [loadGraph]);
 
   const handleSearch = useCallback(async () => {
@@ -259,7 +279,10 @@ export default function Home() {
   if (status !== "ready" || !graph) {
     return (
       <div className="screen">
-        <div className="stateCard">{statusMessage}</div>
+        <div className="stateCard">
+          <div>{statusMessage}</div>
+          <div className="debugPanel">{debugInfo}</div>
+        </div>
       </div>
     );
   }
