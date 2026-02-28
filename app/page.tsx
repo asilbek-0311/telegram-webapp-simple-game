@@ -66,7 +66,6 @@ export default function Home() {
     "loading"
   );
   const [statusMessage, setStatusMessage] = useState("Authenticating...");
-  const [debugInfo, setDebugInfo] = useState<string>("");
   const [graph, setGraph] = useState<GraphApiResponse | null>(null);
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -109,12 +108,6 @@ export default function Home() {
         window.Telegram?.WebApp?.expand?.();
 
         const initData = window.Telegram?.WebApp?.initData?.trim() ?? "";
-        const hasTelegram = Boolean(window.Telegram?.WebApp);
-
-        setDebugInfo(
-          `hasTelegram=${hasTelegram} | initDataLen=${initData.length} | attempt=${attempts}`
-        );
-
         if (!initData) {
           attempts += 1;
           if (attempts < maxAttempts && !cancelled) {
@@ -277,11 +270,29 @@ export default function Home() {
   }, [graph?.me.id, directNodes, secondNodes]);
 
   if (status !== "ready" || !graph) {
+    const title =
+      status === "loading"
+        ? "Loading your social graph"
+        : status === "blocked"
+          ? "Open from Telegram"
+          : "Unable to authenticate";
+
     return (
       <div className="screen">
         <div className="stateCard">
-          <div>{statusMessage}</div>
-          <div className="debugPanel">{debugInfo}</div>
+          <h2 className="stateTitle">{title}</h2>
+          <p className="stateMessage">{statusMessage}</p>
+          {status === "loading" ? (
+            <>
+              <div className="loadingBar" />
+              <div className="loadingBar loadingBarShort" />
+              <div className="loadingDots" aria-hidden="true">
+                <span />
+                <span />
+                <span />
+              </div>
+            </>
+          ) : null}
         </div>
       </div>
     );

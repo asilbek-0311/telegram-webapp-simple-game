@@ -44,11 +44,76 @@ body {
   text-align: center;
 }
 
-.debugPanel {
-  margin-top: 10px;
-  font-size: 12px;
+.stateTitle {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.stateMessage {
+  margin-top: 8px;
   color: var(--muted);
-  word-break: break-all;
+  font-size: 14px;
+}
+
+.loadingBar {
+  height: 12px;
+  border-radius: 999px;
+  margin: 16px auto 0;
+  width: min(320px, 100%);
+  background: linear-gradient(90deg, #dbe8ff 0%, #f2f7ff 50%, #dbe8ff 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s linear infinite;
+}
+
+.loadingBarShort {
+  width: min(220px, 100%);
+  margin-top: 10px;
+}
+
+.loadingDots {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.loadingDots span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #8ba1cb;
+  animation: bounce 1.2s ease-in-out infinite;
+}
+
+.loadingDots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.loadingDots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes bounce {
+  0%,
+  80%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.55;
+  }
+  40% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
 }
 
 .topBar {
