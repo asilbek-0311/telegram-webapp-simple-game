@@ -7,9 +7,12 @@ Create `/Users/beks/coding/Projects/telegram_webapp/.env.local`:
 SUPABASE_URL=https://<project>.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<service_role_key>
 TELEGRAM_BOT_TOKEN=<bot_token>
+TELEGRAM_BOT_USERNAME=<bot_username_without_@>
+APP_BASE_URL=https://<deployed-app-domain>
 SESSION_SECRET=<long-random-secret>
 TELEGRAM_AUTH_MAX_AGE_SEC=300
 SECOND_DEGREE_LIMIT=60
+INVITE_TTL_SEC=2592000
 ```
 
 ## 2) Run SQL Migration
@@ -42,6 +45,9 @@ If you open in normal browser (not Telegram), the app stays in guard mode and as
 - `GET /api/users/search?q=<username>` searches by username.
 - `POST /api/friends/request` creates pending or auto-accepts reciprocal request.
 - `POST /api/friends/accept` accepts incoming pending request.
+- `GET /api/invite/link` returns a signed shareable invite link.
+- `POST /api/invite/preview` previews invite status before accept.
+- `POST /api/invite/accept` accepts invite and creates/links friendship.
 
 ## 6) Notes
 - Username search only works for users who have a Telegram username.

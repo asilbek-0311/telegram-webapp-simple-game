@@ -2,13 +2,22 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Facehash } from "facehash";
-import type { FriendGraphResponse, UserPublic } from "@/lib/types";
+import type {
+  FriendGraphResponse,
+  InviteAcceptResponse,
+  InviteLinkResponse,
+  InvitePreviewResponse,
+  UserPublic,
+} from "@/lib/types";
 
 declare global {
   interface Window {
     Telegram?: {
       WebApp?: {
         initData?: string;
+        initDataUnsafe?: {
+          start_param?: string;
+        };
         ready?: () => void;
         expand?: () => void;
       };
@@ -39,7 +48,7 @@ function toLabel(user: UserPublic): string {
   if (user.displayName) {
     return user.displayName;
   }
-  return `id:${user.telegramId}`;
+  return `id:${user.telegramId.slice(-6)}`;
 }
 
 function placeNodes(users: UserPublic[], radius: number, size: number): PositionedNode[] {
@@ -61,6 +70,37 @@ function placeNodes(users: UserPublic[], radius: number, size: number): Position
     });
 }
 
+function extractInviteToken(): string | null {
+  const fromUrl = new URLSearchParams(window.location.search).get("invite")?.trim();
+  if (fromUrl) {
+    return fromUrl;
+  }
+
+  const startParam = window.Telegram?.WebApp?.initDataUnsafe?.start_param?.trim();
+  if (startParam?.startsWith("invite_")) {
+    const token = startParam.slice("invite_".length);
+    return token || null;
+  }
+
+  return null;
+}
+
+function mapInviteStatus(status: InvitePreviewResponse["status"]): string {
+  if (status === "self") {
+    return "This is your invite link.";
+  }
+  if (status === "already_connected") {
+    return "You are already connected.";
+  }
+  if (status === "pending_incoming") {
+    return "This user already sent you a request.";
+  }
+  if (status === "pending_outgoing") {
+    return "You already sent this user a request.";
+  }
+  return "Accept this invite to connect.";
+}
+
 export default function Home() {
   const [status, setStatus] = useState<"loading" | "ready" | "blocked" | "error">(
     "loading"
@@ -73,6 +113,9 @@ export default function Home() {
   const [isSearching, setIsSearching] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [toast, setToast] = useState<string>("");
+  const [inviteLink, setInviteLink] = useState<InviteLinkResponse | null>(null);
+  const [invitePreview, setInvitePreview] = useState<InvitePreviewResponse | null>(null);
+  const [inviteToken, setInviteToken] = useState<string | null>(null);
 
   useEffect(() => {
     if (!toast) {
@@ -95,6 +138,39 @@ export default function Home() {
 
     const payload = (await response.json()) as GraphApiResponse;
     setGraph(payload);
+  }, []);
+
+  const loadInviteLink = useCallback(async () => {
+    const response = await fetch("/api/invite/link", {
+      method: "GET",
+      credentials: "include",
+    });
+
+    if (!response.ok) {
+      throw new Error("Unable to load invite link");
+    }
+
+    const payload = (await response.json()) as InviteLinkResponse;
+    setInviteLink(payload);
+  }, []);
+
+  const loadInvitePreview = useCallback(async (token: string) => {
+    const response = await fetch("/api/invite/preview", {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ token }),
+    });
+
+    if (!response.ok) {
+      const body = (await response.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(body?.error ?? "Unable to preview invite");
+    }
+
+    const payload = (await response.json()) as InvitePreviewResponse;
+    setInvitePreview(payload);
   }, []);
 
   useEffect(() => {
@@ -136,7 +212,14 @@ export default function Home() {
           throw new Error(body?.error ?? "Telegram authentication failed");
         }
 
-        await loadGraph();
+        await Promise.all([loadGraph(), loadInviteLink()]);
+
+        const token = extractInviteToken();
+        if (token) {
+          setInviteToken(token);
+          await loadInvitePreview(token);
+        }
+
         setStatus("ready");
         setStatusMessage("");
       } catch (error) {
@@ -151,7 +234,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [loadGraph]);
+  }, [loadGraph, loadInviteLink, loadInvitePreview]);
 
   const handleSearch = useCallback(async () => {
     if (!query.trim()) {
@@ -218,7 +301,7 @@ export default function Home() {
     [loadGraph]
   );
 
-  const handleAccept = useCallback(
+  const handleAcceptRequest = useCallback(
     async (requestId: string) => {
       setBusyKey(`accept:${requestId}`);
       try {
@@ -246,6 +329,57 @@ export default function Home() {
     },
     [loadGraph]
   );
+
+  const handleCopyInvite = useCallback(async () => {
+    if (!inviteLink) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(inviteLink.startAppLink);
+      setToast("Invite link copied.");
+    } catch {
+      setToast("Unable to copy link.");
+    }
+  }, [inviteLink]);
+
+  const handleAcceptInvite = useCallback(async () => {
+    if (!inviteToken) {
+      return;
+    }
+
+    setBusyKey("invite-accept");
+    try {
+      const response = await fetch("/api/invite/accept", {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ token: inviteToken }),
+      });
+
+      const payload = (await response.json()) as
+        | ({ error?: string } & Partial<InviteAcceptResponse>)
+        | null;
+
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Unable to accept invite");
+      }
+
+      setToast(
+        payload?.status === "already_connected"
+          ? "You are already connected."
+          : "Invite accepted."
+      );
+
+      await Promise.all([loadGraph(), loadInvitePreview(inviteToken)]);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Unable to accept invite");
+    } finally {
+      setBusyKey(null);
+    }
+  }, [inviteToken, loadGraph, loadInvitePreview]);
 
   const directNodes = useMemo(
     () => placeNodes(graph?.directFriends ?? [], 125, 64),
@@ -301,24 +435,55 @@ export default function Home() {
   return (
     <div className="screen">
       <header className="topBar">
-        <button
-          className="connectionsBtn"
-          type="button"
-          onClick={() => setIsPanelOpen(true)}
-        >
+        <button className="connectionsBtn" type="button" onClick={handleCopyInvite}>
+          Share Invite
+        </button>
+        <button className="connectionsBtn" type="button" onClick={() => setIsPanelOpen(true)}>
           Connections
         </button>
       </header>
 
       <main className="main">
-        <Facehash
-          name={graph.me.facehashSeed}
-          size={170}
-          showInitial={false}
-          enableBlink
-          colors={["#ff6f61", "#6c63ff", "#2ec4b6", "#ffb703", "#3a86ff"]}
-          className="faceMain"
-        />
+        {invitePreview ? (
+          <section className="inviteCard">
+            <div className="inviteCardRow">
+              <Facehash
+                name={invitePreview.inviter.facehashSeed}
+                size={58}
+                showInitial
+                enableBlink
+                colors={["#ff6f61", "#6c63ff", "#2ec4b6", "#ffb703", "#3a86ff"]}
+              />
+              <div>
+                <strong>{toLabel(invitePreview.inviter)}</strong>
+                <p className="hint">{mapInviteStatus(invitePreview.status)}</p>
+              </div>
+            </div>
+            <div className="inviteActions">
+              <button
+                type="button"
+                className="primary"
+                disabled={invitePreview.status !== "can_accept" || busyKey === "invite-accept"}
+                onClick={handleAcceptInvite}
+              >
+                Accept Invite
+              </button>
+              <span className="hint">Valid until {new Date(invitePreview.expiresAt).toLocaleDateString()}</span>
+            </div>
+          </section>
+        ) : null}
+
+        <div className="meBlock">
+          <Facehash
+            name={graph.me.facehashSeed}
+            size={170}
+            showInitial
+            enableBlink
+            colors={["#ff6f61", "#6c63ff", "#2ec4b6", "#ffb703", "#3a86ff"]}
+            className="faceMain"
+          />
+          <div className="meLabel" title={toLabel(graph.me)}>{toLabel(graph.me)}</div>
+        </div>
 
         <div className="stats">
           <span>Connected: {graph.stats.connected}</span>
@@ -347,50 +512,45 @@ export default function Home() {
             })}
           </svg>
 
-          <div className="graphNode graphNodeCenter" style={{ left: 210, top: 210 }}>
+          <div className="graphNode" style={{ left: 210, top: 210 }}>
             <Facehash
               name={graph.me.facehashSeed}
               size={74}
-              showInitial={false}
+              showInitial
               enableBlink
               colors={["#ff6f61", "#6c63ff", "#2ec4b6", "#ffb703", "#3a86ff"]}
             />
+            <div className="nodeLabel" title={toLabel(graph.me)}>{toLabel(graph.me)}</div>
           </div>
 
           {directNodes.map((node) => (
-            <button
-              type="button"
-              className="graphNode graphNodeButton"
-              key={node.user.id}
-              style={{ left: node.x, top: node.y }}
-              title={toLabel(node.user)}
-            >
-              <Facehash
-                name={node.user.facehashSeed}
-                size={node.size}
-                showInitial={false}
-                enableBlink
-                colors={["#ff6f61", "#6c63ff", "#2ec4b6", "#ffb703", "#3a86ff"]}
-              />
-            </button>
+            <div className="graphNode" key={node.user.id} style={{ left: node.x, top: node.y }}>
+              <button type="button" className="graphNodeButton" title={toLabel(node.user)}>
+                <Facehash
+                  name={node.user.facehashSeed}
+                  size={node.size}
+                  showInitial
+                  enableBlink
+                  colors={["#ff6f61", "#6c63ff", "#2ec4b6", "#ffb703", "#3a86ff"]}
+                />
+              </button>
+              <div className="nodeLabel" title={toLabel(node.user)}>{toLabel(node.user)}</div>
+            </div>
           ))}
 
           {secondNodes.map((node) => (
-            <button
-              type="button"
-              className="graphNode graphNodeButton"
-              key={node.user.id}
-              style={{ left: node.x, top: node.y }}
-              title={toLabel(node.user)}
-            >
-              <Facehash
-                name={node.user.facehashSeed}
-                size={node.size}
-                showInitial={false}
-                enableBlink
-                colors={["#ff6f61", "#6c63ff", "#2ec4b6", "#ffb703", "#3a86ff"]}
-              />
-            </button>
+            <div className="graphNode" key={node.user.id} style={{ left: node.x, top: node.y }}>
+              <button type="button" className="graphNodeButton" title={toLabel(node.user)}>
+                <Facehash
+                  name={node.user.facehashSeed}
+                  size={node.size}
+                  showInitial
+                  enableBlink
+                  colors={["#ff6f61", "#6c63ff", "#2ec4b6", "#ffb703", "#3a86ff"]}
+                />
+              </button>
+              <div className="nodeLabel" title={toLabel(node.user)}>{toLabel(node.user)}</div>
+            </div>
           ))}
         </section>
       </main>
@@ -402,6 +562,16 @@ export default function Home() {
             Close
           </button>
         </div>
+
+        <section className="drawerSection">
+          <h3>Invite Link</h3>
+          <div className="listItem stackItem">
+            <span className="inviteUrl">{inviteLink?.startAppLink ?? "Loading invite link..."}</span>
+            <button type="button" className="primary" onClick={handleCopyInvite} disabled={!inviteLink}>
+              Copy
+            </button>
+          </div>
+        </section>
 
         <section className="drawerSection">
           <label htmlFor="search">Search by username</label>
@@ -445,7 +615,7 @@ export default function Home() {
                 <button
                   type="button"
                   className="primary"
-                  onClick={() => handleAccept(item.id)}
+                  onClick={() => handleAcceptRequest(item.id)}
                   disabled={busyKey === `accept:${item.id}`}
                 >
                   Accept

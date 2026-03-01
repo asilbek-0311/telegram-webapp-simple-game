@@ -1,6 +1,12 @@
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
 import { canonicalFriendPair, normalizeUsername } from "@/lib/friends/logic";
-import { FriendGraphResponse, UserPublic } from "@/lib/types";
+import {
+  FriendGraphResponse,
+  InviteAcceptResponse,
+  InvitePreviewResponse,
+  InviteStatus,
+  UserPublic,
+} from "@/lib/types";
 
 type UserRow = {
   id: string;
@@ -14,7 +20,6 @@ type FriendshipRow = {
   id: string;
   user_a_id: string;
   user_b_id: string;
-  created_at: string;
 };
 
 type FriendRequestRow = {
@@ -22,8 +27,6 @@ type FriendRequestRow = {
   from_user_id: string;
   to_user_id: string;
   status: "pending" | "accepted" | "rejected" | "canceled";
-  created_at: string;
-  updated_at: string;
 };
 
 function toUserPublic(row: UserRow): UserPublic {
@@ -34,6 +37,82 @@ function toUserPublic(row: UserRow): UserPublic {
     displayName: row.display_name,
     facehashSeed: row.facehash_seed,
   };
+}
+
+async function getUserById(userId: string): Promise<UserPublic | null> {
+  const supabaseAdmin = getSupabaseAdmin();
+  const { data, error } = await supabaseAdmin
+    .from("users")
+    .select("id, telegram_id, username, display_name, facehash_seed")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (error || !data) {
+    return null;
+  }
+
+  return toUserPublic(data as UserRow);
+}
+
+async function getPendingRequest(options: {
+  fromUserId: string;
+  toUserId: string;
+}): Promise<{ id: string } | null> {
+  const supabaseAdmin = getSupabaseAdmin();
+  const { data } = await supabaseAdmin
+    .from("friend_requests")
+    .select("id")
+    .eq("from_user_id", options.fromUserId)
+    .eq("to_user_id", options.toUserId)
+    .eq("status", "pending")
+    .maybeSingle();
+
+  return (data as { id: string } | null) ?? null;
+}
+
+async function getExistingFriendship(options: {
+  leftUserId: string;
+  rightUserId: string;
+}): Promise<{ id: string } | null> {
+  const supabaseAdmin = getSupabaseAdmin();
+  const [userA, userB] = canonicalFriendPair(options.leftUserId, options.rightUserId);
+  const { data } = await supabaseAdmin
+    .from("friendships")
+    .select("id")
+    .eq("user_a_id", userA)
+    .eq("user_b_id", userB)
+    .maybeSingle();
+
+  return (data as { id: string } | null) ?? null;
+}
+
+async function upsertFriendship(options: {
+  leftUserId: string;
+  rightUserId: string;
+}): Promise<string> {
+  const supabaseAdmin = getSupabaseAdmin();
+  const [userA, userB] = canonicalFriendPair(options.leftUserId, options.rightUserId);
+
+  const { data, error } = await supabaseAdmin
+    .from("friendships")
+    .upsert(
+      {
+        user_a_id: userA,
+        user_b_id: userB,
+      },
+      {
+        onConflict: "user_a_id,user_b_id",
+      }
+    )
+    .select("id")
+    .single();
+
+  const friendship = data as { id: string } | null;
+  if (error || !friendship?.id) {
+    throw new Error("Unable to create friendship");
+  }
+
+  return friendship.id;
 }
 
 export async function listDirectFriendIds(userId: string): Promise<Set<string>> {
@@ -112,40 +191,28 @@ export async function sendFriendRequest(options: {
     throw new Error("Cannot connect to yourself");
   }
 
-  const [userA, userB] = canonicalFriendPair(options.fromUserId, targetUser.id);
-  const { data: existingFriend } = await supabaseAdmin
-    .from("friendships")
-    .select("id")
-    .eq("user_a_id", userA)
-    .eq("user_b_id", userB)
-    .maybeSingle();
-  const existing = existingFriend as { id: string } | null;
+  const existing = await getExistingFriendship({
+    leftUserId: options.fromUserId,
+    rightUserId: targetUser.id,
+  });
 
   if (existing?.id) {
     return { status: "already_connected", friendshipId: existing.id };
   }
 
-  const { data: sameDirPending } = await supabaseAdmin
-    .from("friend_requests")
-    .select("id")
-    .eq("from_user_id", options.fromUserId)
-    .eq("to_user_id", targetUser.id)
-    .eq("status", "pending")
-    .maybeSingle();
-  const pendingSame = sameDirPending as { id: string } | null;
+  const pendingSame = await getPendingRequest({
+    fromUserId: options.fromUserId,
+    toUserId: targetUser.id,
+  });
 
   if (pendingSame?.id) {
     return { status: "pending", friendshipId: null };
   }
 
-  const { data: reciprocalPending } = await supabaseAdmin
-    .from("friend_requests")
-    .select("id")
-    .eq("from_user_id", targetUser.id)
-    .eq("to_user_id", options.fromUserId)
-    .eq("status", "pending")
-    .maybeSingle();
-  const reciprocal = reciprocalPending as { id: string } | null;
+  const reciprocal = await getPendingRequest({
+    fromUserId: targetUser.id,
+    toUserId: options.fromUserId,
+  });
 
   if (reciprocal?.id) {
     const { error: updateReciprocalError } = await supabaseAdmin
@@ -169,35 +236,19 @@ export async function sendFriendRequest(options: {
       throw new Error("Unable to store accepted request");
     }
 
-    const { data: friendship, error: friendshipError } = await supabaseAdmin
-      .from("friendships")
-      .upsert(
-        {
-          user_a_id: userA,
-          user_b_id: userB,
-        },
-        {
-          onConflict: "user_a_id,user_b_id",
-        }
-      )
-      .select("id")
-      .single();
-    const acceptedFriendship = friendship as { id: string } | null;
+    const friendshipId = await upsertFriendship({
+      leftUserId: options.fromUserId,
+      rightUserId: targetUser.id,
+    });
 
-    if (friendshipError || !acceptedFriendship?.id) {
-      throw new Error("Unable to create friendship");
-    }
-
-    return { status: "accepted", friendshipId: acceptedFriendship.id };
+    return { status: "accepted", friendshipId };
   }
 
-  const { error: insertPendingError } = await supabaseAdmin
-    .from("friend_requests")
-      .insert({
-        from_user_id: options.fromUserId,
-        to_user_id: targetUser.id,
-        status: "pending",
-      });
+  const { error: insertPendingError } = await supabaseAdmin.from("friend_requests").insert({
+    from_user_id: options.fromUserId,
+    to_user_id: targetUser.id,
+    status: "pending",
+  });
 
   if (insertPendingError) {
     throw new Error("Unable to create friend request");
@@ -243,31 +294,148 @@ export async function acceptFriendRequest(options: {
     throw new Error("Unable to accept request");
   }
 
-  const [userA, userB] = canonicalFriendPair(
-    friendRequest.from_user_id,
-    friendRequest.to_user_id
-  );
+  const friendshipId = await upsertFriendship({
+    leftUserId: friendRequest.from_user_id,
+    rightUserId: friendRequest.to_user_id,
+  });
 
-  const { data: friendship, error: friendshipError } = await supabaseAdmin
-    .from("friendships")
-    .upsert(
-      {
-        user_a_id: userA,
-        user_b_id: userB,
-      },
-      {
-        onConflict: "user_a_id,user_b_id",
-      }
-    )
-    .select("id")
-    .single();
-  const acceptedFriendship = friendship as { id: string } | null;
+  return { status: "accepted", friendshipId };
+}
 
-  if (friendshipError || !acceptedFriendship?.id) {
-    throw new Error("Unable to create friendship");
+export async function getInvitePreview(options: {
+  viewerUserId: string;
+  inviterUserId: string;
+  expiresAt: string;
+}): Promise<InvitePreviewResponse> {
+  const inviter = await getUserById(options.inviterUserId);
+  if (!inviter) {
+    throw new Error("Inviter not found");
   }
 
-  return { status: "accepted", friendshipId: acceptedFriendship.id };
+  let status: InviteStatus = "can_accept";
+
+  if (options.viewerUserId === options.inviterUserId) {
+    status = "self";
+  } else {
+    const existing = await getExistingFriendship({
+      leftUserId: options.viewerUserId,
+      rightUserId: options.inviterUserId,
+    });
+
+    if (existing?.id) {
+      status = "already_connected";
+    } else {
+      const incoming = await getPendingRequest({
+        fromUserId: options.inviterUserId,
+        toUserId: options.viewerUserId,
+      });
+
+      if (incoming?.id) {
+        status = "pending_incoming";
+      } else {
+        const outgoing = await getPendingRequest({
+          fromUserId: options.viewerUserId,
+          toUserId: options.inviterUserId,
+        });
+
+        status = outgoing?.id ? "pending_outgoing" : "can_accept";
+      }
+    }
+  }
+
+  return {
+    inviter,
+    status,
+    expiresAt: options.expiresAt,
+  };
+}
+
+export async function acceptInviteTokenForUser(options: {
+  viewerUserId: string;
+  inviterUserId: string;
+}): Promise<InviteAcceptResponse> {
+  const supabaseAdmin = getSupabaseAdmin();
+
+  if (options.viewerUserId === options.inviterUserId) {
+    throw new Error("This is your invite link");
+  }
+
+  const existing = await getExistingFriendship({
+    leftUserId: options.viewerUserId,
+    rightUserId: options.inviterUserId,
+  });
+
+  if (existing?.id) {
+    return { status: "already_connected", friendshipId: existing.id };
+  }
+
+  const incoming = await getPendingRequest({
+    fromUserId: options.inviterUserId,
+    toUserId: options.viewerUserId,
+  });
+
+  if (incoming?.id) {
+    const accepted = await acceptFriendRequest({
+      requestId: incoming.id,
+      accepterUserId: options.viewerUserId,
+    });
+
+    return { status: accepted.status, friendshipId: accepted.friendshipId };
+  }
+
+  const outgoing = await getPendingRequest({
+    fromUserId: options.viewerUserId,
+    toUserId: options.inviterUserId,
+  });
+
+  if (outgoing?.id) {
+    const { error: updateOutgoingError } = await supabaseAdmin
+      .from("friend_requests")
+      .update({ status: "accepted" })
+      .eq("id", outgoing.id);
+
+    if (updateOutgoingError) {
+      throw new Error("Unable to confirm pending request");
+    }
+
+    const { error: insertMirrorAccepted } = await supabaseAdmin
+      .from("friend_requests")
+      .insert({
+        from_user_id: options.inviterUserId,
+        to_user_id: options.viewerUserId,
+        status: "accepted",
+      });
+
+    if (insertMirrorAccepted) {
+      throw new Error("Unable to store accepted invite request");
+    }
+
+    const friendshipId = await upsertFriendship({
+      leftUserId: options.viewerUserId,
+      rightUserId: options.inviterUserId,
+    });
+
+    return { status: "accepted", friendshipId };
+  }
+
+  const { error: insertAcceptedError } = await supabaseAdmin
+    .from("friend_requests")
+    .insert({
+      from_user_id: options.inviterUserId,
+      to_user_id: options.viewerUserId,
+      status: "accepted",
+    });
+
+  if (insertAcceptedError) {
+    throw new Error("Unable to create accepted invite request");
+  }
+
+  const friendshipId = await upsertFriendship({
+    leftUserId: options.viewerUserId,
+    rightUserId: options.inviterUserId,
+  });
+
+  return { status: "accepted", friendshipId };
 }
 
 export async function getFriendGraph(
@@ -289,7 +457,7 @@ export async function getFriendGraph(
 
   const { data: directEdgeRows } = await supabaseAdmin
     .from("friendships")
-    .select("id, user_a_id, user_b_id")
+    .select("user_a_id, user_b_id")
     .or(`user_a_id.eq.${userId},user_b_id.eq.${userId}`);
 
   const directIds = new Set<string>();
@@ -309,9 +477,10 @@ export async function getFriendGraph(
       ).data?.map((row) => toUserPublic(row as UserRow)) ?? []
     : [];
 
-  const edges: Array<{ source: string; target: string }> = directFriends.map(
-    (friend) => ({ source: userId, target: friend.id })
-  );
+  const edges: Array<{ source: string; target: string }> = directFriends.map((friend) => ({
+    source: userId,
+    target: friend.id,
+  }));
 
   let secondDegree: UserPublic[] = [];
 
@@ -436,7 +605,7 @@ export async function listIncomingPendingRequests(userId: string): Promise<
     .select("id, telegram_id, username, display_name, facehash_seed")
     .in("id", userIds);
 
-  const map = new Map((users ?? []).map((row) => [row.id, toUserPublic(row as UserRow)]));
+  const map = new Map((users ?? []).map((row) => [row.id as string, toUserPublic(row as UserRow)]));
 
   return requestRows
     .map((row) => {

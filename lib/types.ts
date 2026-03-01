@@ -48,6 +48,31 @@ export type FriendGraphResponse = {
   };
 };
 
+export type InviteStatus =
+  | "can_accept"
+  | "already_connected"
+  | "pending_incoming"
+  | "pending_outgoing"
+  | "self";
+
+export type InviteLinkResponse = {
+  inviteToken: string;
+  startAppLink: string;
+  webFallbackLink: string;
+  expiresAt: string;
+};
+
+export type InvitePreviewResponse = {
+  inviter: UserPublic;
+  status: InviteStatus;
+  expiresAt: string;
+};
+
+export type InviteAcceptResponse = {
+  status: "accepted" | "already_connected";
+  friendshipId: string | null;
+};
+
 export type ApiError = {
   error: string;
 };
